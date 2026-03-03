@@ -14,7 +14,7 @@ MODULE_VERSION("0.1");
 #define DEVICE_NAME "nulldump"
 #define CLASS_NAME "nulldump_class"
 #define HEXDUMP_ROWSIZE 16
-#define HEXDUMP_LINE_LENGTH (4 * HEXDUMP_ROWSIZE + 1)
+#define HEXDUMP_LINE_LENGTH (4 * HEXDUMP_ROWSIZE + 2)
 
 static dev_t dev;
 static struct cdev nulldump_cdev;
@@ -37,24 +37,27 @@ static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t 
 	pr_info("pid: %d\n", pid);
 	const char *command = current->comm;
 	pr_info("command: %s\n", command);
+	pr_info("wrote %ld bytes\n", len);
 
-	char *data = kmalloc(len, GFP_KERNEL);
-	size_t n_bytes_read = len - copy_from_user(data, buf, len);
-	pr_info("wrote %ld bytes\n", n_bytes_read);
-
+	char data_buf[HEXDUMP_ROWSIZE];
 	char hexdump[HEXDUMP_LINE_LENGTH];
-	char *i = data;
-	while (n_bytes_read > 0 && n_bytes_read <= len)
+	
+	signed long n_bytes_left = len;
+	while (n_bytes_left > 0)
 	{
-		int n_bytes_written = hex_dump_to_buffer(i, n_bytes_read, HEXDUMP_ROWSIZE, 1, hexdump, HEXDUMP_LINE_LENGTH, true);
-		if (n_bytes_written <= 0)
+		int n_bytes_to_copy = n_bytes_left >= HEXDUMP_ROWSIZE ? HEXDUMP_ROWSIZE : n_bytes_left;
+		int n_bytes_copied =  n_bytes_to_copy - copy_from_user(data_buf, buf, n_bytes_to_copy);
+		
+		int n_bytes_written = hex_dump_to_buffer(data_buf, n_bytes_copied, HEXDUMP_ROWSIZE, 1, hexdump, HEXDUMP_LINE_LENGTH, true);
+		if (n_bytes_written <= 0){
+			pr_info("hexdump error");
 			break;
-		pr_info("hexdump: %07lx %s\n", len - n_bytes_read, hexdump);
-		n_bytes_read -= HEXDUMP_ROWSIZE;
-		i += HEXDUMP_ROWSIZE;
+		}
+		pr_info("hexdump: %07lx %s\n", len - n_bytes_left, hexdump);
+		n_bytes_left -= n_bytes_copied;
+		buf += HEXDUMP_ROWSIZE;
 	}
 
-	kfree(data);
 	return len;
 }
 
