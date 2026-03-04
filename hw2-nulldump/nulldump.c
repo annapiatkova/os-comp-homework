@@ -24,20 +24,16 @@ static struct device *sdev;
 static ssize_t nulldump_read(struct file *file, char __user *buf, size_t len, loff_t *off)
 {	
 	pid_t pid = current->pid;
-	pr_info("pid: %d\n", pid);
 	const char *command = current->comm;
-	pr_info("command: %s\n", command);
-	pr_info("requested %ld bytes\n", len);
+	pr_info("nulldump: pid %d, command: %s, requested %ld bytes\n", pid, command, len);
 	return 0;
 }
 
 static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
 {
 	pid_t pid = current->pid;
-	pr_info("pid: %d\n", pid);
 	const char *command = current->comm;
-	pr_info("command: %s\n", command);
-	pr_info("wrote %ld bytes\n", len);
+	pr_info("nulldump: pid %d, command: %s, wrote %ld bytes\n", pid, command, len);
 
 	char data_buf[HEXDUMP_ROWSIZE];
 	char hexdump[HEXDUMP_LINE_LENGTH];
@@ -48,12 +44,12 @@ static ssize_t nulldump_write(struct file *file, const char __user *buf, size_t 
 		int n_bytes_to_copy = n_bytes_left >= HEXDUMP_ROWSIZE ? HEXDUMP_ROWSIZE : n_bytes_left;
 		int n_bytes_copied =  n_bytes_to_copy - copy_from_user(data_buf, buf, n_bytes_to_copy);
 		
-		int n_bytes_written = hex_dump_to_buffer(data_buf, n_bytes_copied, HEXDUMP_ROWSIZE, 1, hexdump, HEXDUMP_LINE_LENGTH, true);
-		if (n_bytes_written <= 0){
-			pr_info("hexdump error");
-			break;
+		hex_dump_to_buffer(data_buf, n_bytes_copied, HEXDUMP_ROWSIZE, 1, hexdump, HEXDUMP_LINE_LENGTH, true);
+		if (n_bytes_copied < n_bytes_to_copy){
+			pr_info("nulldump: hexdump error\n");
+			return -EFAULT;
 		}
-		pr_info("hexdump: %07lx %s\n", len - n_bytes_left, hexdump);
+		pr_info("nulldump: %07lx %s\n", len - n_bytes_left, hexdump);
 		n_bytes_left -= n_bytes_copied;
 		buf += HEXDUMP_ROWSIZE;
 	}
