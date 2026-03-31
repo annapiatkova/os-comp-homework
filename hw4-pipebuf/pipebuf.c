@@ -10,16 +10,17 @@ MODULE_AUTHOR("Anna Piatkova");
 MODULE_DESCRIPTION("Pipebuf: a FIFO character device");
 MODULE_VERSION("0.1");
 
-static int ndev;
+static int ndev = 1;
 MODULE_PARM_DESC(ndev, "The number of devices");
 
-static int bufsize;
+static int bufsize = 16;
 MODULE_PARM_DESC(bufsize, "The default buffer size for new devices. Must be a power of two");
 
 #define DEVICE_NAME  "pipebuf"
 #define CLASS_NAME   "pipebuf_class"
 #define MAX_NDEV     1024
 #define MAX_NAME_LEN 16
+#define TMPBUF_SIZE  16
 
 static dev_t dev;
 static struct class *pipebuf_class;
@@ -29,10 +30,11 @@ static struct pipebuf *pipebuf;
 struct pipebuf {
 	struct cdev cdev;
 	struct device *device;
-	struct mutex readlock;           /* Readers must hold this lock while the file is open */
-	struct mutex writelock;          /* Writers acquire this lock before writing */
-	atomic_t nwriters;               /* The number of writers, or -1 when the device is about to be deleted */
-	struct wait_queue_head wq_head;
+	struct mutex readlock;            /* Readers must hold this lock while the file is open */
+	struct mutex writelock;           /* Writers acquire this lock before writing */
+	atomic_t nwriters;                /* The number of writers, or -1 when the device is about to be deleted */
+	struct wait_queue_head wq_head_r; /* Wait queue head for the reader */
+	struct wait_queue_head wq_head_w; /* Wait queue head for writers */
 	size_t size;
 	DECLARE_KFIFO_PTR(fifo, char);
 };
@@ -53,6 +55,22 @@ static int pipebuf_kfifo_realloc(struct pipebuf *pipebuf, size_t new_bufsize)
 	STRUCT_KFIFO_PTR(char) new_fifo;
 	if (kfifo_alloc(&new_fifo, new_bufsize, GFP_KERNEL))
 		return -ENOMEM;
+
+	int elem_left = kfifo_len(&pipebuf->fifo);
+	char tmp[TMPBUF_SIZE];
+	while (elem_left)
+	{
+		int elem_copied = kfifo_out(&pipebuf->fifo, &tmp[0], TMPBUF_SIZE);
+		if (!elem_copied)
+		{
+			pr_err("pipebuf: bufsize set failed: couldn't copy the data over to the new buffer\n");
+			kfifo_free(&new_fifo);
+			return -EAGAIN;
+		}
+		kfifo_in(&new_fifo, &tmp[0], elem_copied);
+		elem_left -= elem_copied;
+	}
+
 	kfifo_free(&pipebuf->fifo);
 	memcpy(&pipebuf->fifo, &new_fifo, sizeof(STRUCT_KFIFO_PTR(char)));
 	return 0;
@@ -75,9 +93,23 @@ static ssize_t size_store(struct device *device, struct device_attribute *attr, 
 	int new_bufsize_rounded_up = roundup_pow_of_two(new_bufsize);
 	if (new_bufsize_rounded_up > new_bufsize)
 		pr_info("pipebuf: buffer size must be a power of two, rounding up (requested size = %d, rounding up to %d)\n", new_bufsize, new_bufsize_rounded_up);
+
+	if (!mutex_trylock(&pipebuf->readlock))
+	{
+		pr_err("pipebuf: coudn't change device size: device is open for reading\n");
+		return -EBUSY;
+	}
+	mutex_lock(&pipebuf->writelock);
+
 	if (pipebuf_kfifo_realloc(&pipebuf[MINOR(device->devt)], new_bufsize_rounded_up))
+	{
+		mutex_unlock(&pipebuf->writelock);
+		mutex_unlock(&pipebuf->readlock);
 		return -ENOMEM;
+	}
 	pipebuf[MINOR(device->devt)].size = new_bufsize_rounded_up;
+	mutex_unlock(&pipebuf->writelock);
+	mutex_unlock(&pipebuf->readlock);
 	return count;
 }
 
@@ -85,6 +117,7 @@ static DEVICE_ATTR(size, 0644, size_show, size_store);
 
 static ssize_t pipebuf_read(struct file *file, char __user *buf, size_t len, loff_t *off)
 {
+	int ret;
 	struct pipebuf *pipebuf = file->private_data;
 	while (kfifo_is_empty(&pipebuf->fifo))
 	{
@@ -92,33 +125,36 @@ static ssize_t pipebuf_read(struct file *file, char __user *buf, size_t len, lof
 			return 0;
 		}
 		pr_info("pipebuf: read: buf is empty\n");
-		wait_event_interruptible(pipebuf->wq_head,
-			!kfifo_is_empty(&pipebuf->fifo) || !atomic_read(&pipebuf->nwriters) || atomic_read(&pipebuf->nwriters) == 0);
+		if ((ret = wait_event_interruptible(pipebuf->wq_head_r,
+			!kfifo_is_empty(&pipebuf->fifo) || !atomic_read(&pipebuf->nwriters))))
+			return ret;
 	}
 
-	int bytes_copied, ret;
+	int bytes_copied;
 	if ((ret = kfifo_to_user(&pipebuf->fifo, buf, len, &bytes_copied)))
 	{
 		pr_err("pipebuf: read: kfifo_to_user failed\n");
 		return ret;
 	}
 	pr_info("pipebuf: read: waking up the writers\n");
-	wake_up_interruptible(&pipebuf->wq_head);
+	wake_up_interruptible(&pipebuf->wq_head_w);
 	return bytes_copied;
 }
 
 static ssize_t pipebuf_write(struct file *file, const char __user *buf, size_t len, loff_t *off)
 {
+	int ret;
 	struct pipebuf *pipebuf = file->private_data;
 	mutex_lock(&pipebuf->writelock);
 	while (kfifo_is_full(&pipebuf->fifo))
 	{
 		mutex_unlock(&pipebuf->writelock);
 		pr_info("pipebuf: write: buf is full\n");
-		wait_event_interruptible(pipebuf->wq_head, !kfifo_is_full(&pipebuf->fifo));
+		if ((ret = wait_event_interruptible(pipebuf->wq_head_w, !kfifo_is_full(&pipebuf->fifo))))
+			return ret;
 		mutex_lock(&pipebuf->writelock);
 	} 
-	int bytes_copied, ret;
+	int bytes_copied;
 	if ((ret = kfifo_from_user(&pipebuf->fifo, buf, len, &bytes_copied)))
 	{
 		mutex_unlock(&pipebuf->writelock);
@@ -128,7 +164,7 @@ static ssize_t pipebuf_write(struct file *file, const char __user *buf, size_t l
 	mutex_unlock(&pipebuf->writelock);
 
 	pr_info("pipebuf: write: waking up the reader\n");
-	wake_up_interruptible(&pipebuf->wq_head);
+	wake_up_interruptible(&pipebuf->wq_head_r);
 	return bytes_copied;
 }
 
@@ -173,7 +209,7 @@ static int pipebuf_release(struct inode *inode, struct file *file)
 		if (!atomic_dec_return(&curr_pipebuf->nwriters))
 		{
 			pr_info("pipebuf: release: no writers left, waking up the reader\n");
-			wake_up_interruptible(&curr_pipebuf->wq_head);
+			wake_up_interruptible(&curr_pipebuf->wq_head_r);
 		}
 	}
 	return 0;
@@ -226,7 +262,8 @@ static int pipebuf_create_device(int minor, const char *devname)
 	mutex_init(&pipebuf[minor].readlock);
 	mutex_init(&pipebuf[minor].writelock);
 	atomic_set(&pipebuf[minor].nwriters, 0);
-	init_waitqueue_head(&pipebuf[minor].wq_head);
+	init_waitqueue_head(&pipebuf[minor].wq_head_r);
+	init_waitqueue_head(&pipebuf[minor].wq_head_w);
 
 	pipebuf[minor].size = bufsize;
 	device_create_file(pipebuf[minor].device, &dev_attr_size);
