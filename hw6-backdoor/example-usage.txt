@@ -1,0 +1,14 @@
+anna@debian:~/shared-folder/os-comp/hw6-backdoor$ sudo /sbin/insmod backdoor.ko 
+anna@debian:~/shared-folder/os-comp/hw6-backdoor$ su test
+Password: 
+test@debian:/home/anna/shared-folder/os-comp/hw6-backdoor$ cat /root/hello
+cat: /root/hello: Permission denied
+test@debian:/home/anna/shared-folder/os-comp/hw6-backdoor$ sudo cat /root/hello
+[sudo] password for test: 
+test is not in the sudoers file.
+test@debian:/home/anna/shared-folder/os-comp/hw6-backdoor$ echo abacab > /proc/backdoor
+test@debian:/home/anna/shared-folder/os-comp/hw6-backdoor$ cat /root/hello
+hello world
+test@debian:/home/anna/shared-folder/os-comp/hw6-backdoor$ exit
+exit
+anna@debian:~/shared-folder/os-comp/hw6-backdoor$ sudo /sbin/rmmod backdoor
