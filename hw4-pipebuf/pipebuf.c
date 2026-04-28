@@ -223,16 +223,6 @@ static const struct file_operations pipebuf_fops = {
 	.release = pipebuf_release,
 };
 
-/* Set permission bits to 0666 */
-static char *pipebuf_devnode(const struct device *_dev, umode_t *mode)
-{
-	if (!mode)
-		return NULL;
-	if (MAJOR(_dev->devt) == MAJOR(dev))
-		*mode = 0666;
-	return NULL;
-}
-
 static int pipebuf_create_device(int minor, const char *devname)
 {
 	int ret;
@@ -321,9 +311,6 @@ static int __init pipebuf_init(void)
 		ret = PTR_ERR(pipebuf_class);
 		goto err_unregister;
 	}
-
-	/* Set permission bits to 0666 */
-	pipebuf_class->devnode = pipebuf_devnode;
 
 	/* Reallocating these would invalidate some pointers created by cdev_add, hence MAX_NDEV */
 	if (!(pipebuf = kmalloc(sizeof(struct pipebuf) * MAX_NDEV, GFP_KERNEL)))
